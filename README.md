@@ -1,7 +1,7 @@
 # elasticlone
 A tiny CLI tool to clone elastic search  indexes
 
-[![Build](https://github.com/MedUnes/elasticlone/actions/workflows/go.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/go.yml)
+[![Build](https://github.com/MedUnes/elasticlone/actions/workflows/build.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/build.yml)
 ## Build
 ```bahs
 go build
