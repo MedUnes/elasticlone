@@ -1,7 +1,7 @@
 # elasticlone
 A tiny CLI tool to clone elastic search  indexes
 
-# Usage
+## Usage
 ```bash
 Usage of ./elasticlone:
   -F int
