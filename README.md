@@ -1,6 +1,10 @@
 # elasticlone
 A tiny CLI tool to clone elastic search  indexes
 
+## Build
+```bahs
+go build
+```
 ## Usage
 ```bash
 Usage of ./elasticlone:
