@@ -1,9 +1,7 @@
 # elasticlone
 A tiny CLI tool to clone elastic search  indexes
 
-[![Build](https://github.com/MedUnes/elasticlone/actions/workflows/test.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/test.yml)
-
-[![Release](https://github.com/MedUnes/elasticlone/actions/workflows/release.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/release.yml)
+[![Build](https://github.com/MedUnes/elasticlone/actions/workflows/test.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/test.yml) [![Release](https://github.com/MedUnes/elasticlone/actions/workflows/release.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/release.yml)
 
 ## Build
 ```bahs
