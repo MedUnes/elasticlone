@@ -67,11 +67,11 @@ func main() {
 	sourceConfig := ElasticConfig{URL: srcURL, Index: *srcIndex, User: *srcUser, Pass: *srcPass}
 	destinationConfig := ElasticConfig{URL: destURL, Index: *destIndex, User: *destUser, Pass: *destPass}
 
-	sourceClient, err := createClient(sourceConfig, *srcInsecure, true)
+	sourceClient, err := CreateClient(sourceConfig, *srcInsecure, true)
 	if err != nil {
 		log.Fatalf("Error creating source client: %v", err)
 	}
-	destClient, err := createClient(destinationConfig, false, true)
+	destClient, err := CreateClient(destinationConfig, false, true)
 	if err != nil {
 		log.Fatalf("Error creating destination client: %v", err)
 	}
@@ -93,7 +93,7 @@ func main() {
 	fmt.Println("\nData migration completed successfully.")
 }
 
-func createClient(cfg ElasticConfig, insecure bool, forceHttp1 bool) (*elastic.Client, error) {
+func CreateClient(cfg ElasticConfig, insecure bool, forceHttp1 bool) (*elastic.Client, error) {
 	options := []elastic.ClientOptionFunc{
 		elastic.SetURL(cfg.URL),
 		elastic.SetBasicAuth(cfg.User, cfg.Pass),
