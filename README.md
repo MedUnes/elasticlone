@@ -1,6 +1,6 @@
 # Elasticlone
 
-Elasticlone is a simple command-line utility written in Go to clone an Elasticsearch index from one cluster (source) to another (target). It copies the index mapping, settings (excluding non-transferable ones), and all documents.
+Elasticlone is a simple command-line utility written in Go to clone an Elasticsearch index from one cluster (source) to another (target). It copies the index mapping, settings (excluding non-transferable ones), and all documents. It supports cloning to the same index name or a different one, and can use source connection details for the target if specific target details are omitted.
 
 ## Features
 
@@ -9,7 +9,9 @@ Elasticlone is a simple command-line utility written in Go to clone an Elasticse
 * Copies all documents using efficient Scroll API.
 * Supports basic authentication for source and target clusters.
 * Uses concurrent workers for faster data indexing on the target.
-* Supports wildcard index patterns (e.g., `my-index-*`).
+* Supports wildcard index patterns (e.g., `my-index-*`) for the source.
+* Optionally allows specifying a different target index name (for single source index matches).
+* Target connection details (host, port, user, pass) default to source details if not provided.
 * Allows disabling SSL/TLS verification (use with caution).
 
 ## Installation
@@ -49,58 +51,59 @@ This will download, build, and install the binary into your `$GOPATH/bin` or `$H
     cp .env.dist .env
     ```
 2.  **Edit `.env`:**
-    Open the `.env` file with a text editor and fill in the details for your source and target Elasticsearch clusters, and the index you want to clone.
+    Open the `.env` file with a text editor and fill in the details. Target connection details are optional and will default to the source values if left blank.
 
     ```dotenv
     # .env file content
 
     # --- Source Elasticsearch Cluster ---
-    SOURCE_HOST=YOUR_SOURCE_HOST_IP_OR_DNS
-    SOURCE_PORT=9200
-    SOURCE_USER= # Optional: elastic
-    SOURCE_PASS= # Optional: changeme
+    SOURCE_HOST=YOUR_SOURCE_HOST_IP_OR_DNS   # Required
+    SOURCE_PORT=9200                         # Required
+    SOURCE_USER=                             # Optional: elastic
+    SOURCE_PASS=                             # Optional: changeme
 
-    # --- Target Elasticsearch Cluster ---
-    TARGET_HOST=YOUR_TARGET_HOST_IP_OR_DNS
-    TARGET_PORT=9200
-    TARGET_USER= # Optional: elastic
-    TARGET_PASS= # Optional: changeme
+    # --- Target Elasticsearch Cluster (Optional - Defaults to Source if Blank) ---
+    TARGET_HOST=                             # Optional: Defaults to SOURCE_HOST
+    TARGET_PORT=                             # Optional: Defaults to SOURCE_PORT
+    TARGET_USER=                             # Optional: Defaults to SOURCE_USER
+    TARGET_PASS=                             # Optional: Defaults to SOURCE_PASS
 
     # --- Cloning Parameters ---
-    INDEX_NAME=your-index-name-or-pattern # e.g., my-app-logs-*, specific-index
-    BATCH_SIZE=1000 # Optional: documents per scroll request
-    WORKERS=4       # Optional: concurrent indexing workers
-    SSL_VERIFY=true # Optional: set to "false" to disable certificate checks
+    INDEX_NAME=your-source-index-pattern     # Required: e.g., my-app-logs-*, specific-index
+    TARGET_INDEX_NAME=                       # Optional: Target name. Defaults to source name(s). Only works if INDEX_NAME matches exactly one source index.
+    BATCH_SIZE=1000                          # Optional: documents per scroll request
+    WORKERS=4                                # Optional: concurrent indexing workers
+    SSL_VERIFY=true                          # Optional: set to "false" to disable certificate checks
 
     # --- Advanced ---
-    # SCROLL_DURATION=1m # Optional: scroll context duration
-    # MAX_RETRIES=3      # Optional: max retries for ES operations
+    # SCROLL_DURATION=1m                     # Optional: scroll context duration
+    # MAX_RETRIES=3                          # Optional: max retries for ES operations
     ```
 
 ### Configuration Keys
 
 * `SOURCE_HOST` (Required): Hostname or IP address of the source Elasticsearch cluster.
 * `SOURCE_PORT` (Required): Port number of the source Elasticsearch cluster.
-* `SOURCE_USER` (Optional): Username for source cluster basic authentication. Leave blank if no authentication is needed.
+* `SOURCE_USER` (Optional): Username for source cluster basic authentication.
 * `SOURCE_PASS` (Optional): Password for source cluster basic authentication.
-* `TARGET_HOST` (Required): Hostname or IP address of the target Elasticsearch cluster.
-* `TARGET_PORT` (Required): Port number of the target Elasticsearch cluster.
-* `TARGET_USER` (Optional): Username for target cluster basic authentication.
-* `TARGET_PASS` (Optional): Password for target cluster basic authentication.
-* `INDEX_NAME` (Required): The name or wildcard pattern of the index/indices to clone (e.g., `my-index`, `logstash-*`).
+* `TARGET_HOST` (Optional): Hostname or IP address of the target cluster. **Defaults to `SOURCE_HOST` if empty.**
+* `TARGET_PORT` (Optional): Port number of the target cluster. **Defaults to `SOURCE_PORT` if empty.**
+* `TARGET_USER` (Optional): Username for target cluster basic authentication. **Defaults to `SOURCE_USER` if empty.**
+* `TARGET_PASS` (Optional): Password for target cluster basic authentication. **Defaults to `SOURCE_PASS` if empty.**
+* `INDEX_NAME` (Required): The name or wildcard pattern of the index/indices on the **source** cluster (e.g., `my-index`, `logstash-*`).
+* `TARGET_INDEX_NAME` (Optional): The specific name for the index on the **target** cluster. **Defaults to the source index name.** **Important:** This setting can *only* be used if the `INDEX_NAME` pattern matches *exactly one* source index. It will cause an error if `INDEX_NAME` is a wildcard that matches multiple source indices.
 * `BATCH_SIZE` (Optional): Number of documents to fetch per scroll request (default: `1000`).
 * `WORKERS` (Optional): Number of concurrent workers for indexing data into the target cluster (default: `4`).
-* `SSL_VERIFY` (Optional): Set to `false` to disable SSL/TLS certificate verification for both connections (default: `true`). **Warning:** Setting this to `false` is insecure and should only be used in trusted environments or for testing.
-* `SCROLL_DURATION` (Optional): How long the scroll context should be kept alive on the source cluster (default: `1m`). Format examples: `1m`, `5m`, `1h`.
-* `MAX_RETRIES` (Optional): Maximum number of retries for Elasticsearch operations that fail with retryable status codes (e.g., 502, 503, 504, 429) (default: `3`).
+* `SSL_VERIFY` (Optional): Set to `false` to disable SSL/TLS certificate verification for both connections (default: `true`). **Warning:** Setting this to `false` is insecure.
+* `SCROLL_DURATION` (Optional): How long the scroll context should be kept alive on the source cluster (default: `1m`).
+* `MAX_RETRIES` (Optional): Maximum number of retries for failed Elasticsearch operations (default: `3`).
 
-**Note:** You can also set these values directly as environment variables in your shell, which will override the values in the `.env` file if `godotenv` loading fails or is bypassed.
+**Note:** Values can also be set directly as environment variables, overriding the `.env` file.
 
 ## Usage
 
-1.  Ensure your `.env` file is correctly configured in the directory where you plan to run the command.
-2.  Navigate to the directory containing the `elasticlone` executable (or ensure it's in your PATH).
-3.  Run the executable:
+1.  Ensure your `.env` file is correctly configured.
+2.  Run the executable from the same directory (or ensure it's in your PATH):
     ```bash
     ./elasticlone
     ```
@@ -109,20 +112,23 @@ This will download, build, and install the binary into your `$GOPATH/bin` or `$H
     go run main.go
     ```
 
-The tool will output logs to the console indicating the connection status, indices being processed, progress, and any errors encountered.
+The tool will log its progress, including connection details, indices being processed, and target names used.
 
 ## How it Works
 
-1.  Loads configuration from the `.env` file or environment variables.
-2.  Connects to both source and target Elasticsearch clusters.
-3.  Resolves the `INDEX_NAME` pattern to a list of specific indices on the source cluster.
-4.  For each source index found:
-    a. Retrieves the index mappings and settings from the source.
-    b. Cleans non-transferable settings (like `uuid`, `creation_date`).
-    c. Creates a new index on the target cluster with the same name, using the retrieved mappings and cleaned settings. (Skips creation if the target index already exists).
-    d. Uses the Elasticsearch Scroll API to efficiently retrieve all documents from the source index in batches.
-    e. Uses the Elasticsearch Bulk API with concurrent workers to index these documents into the corresponding target index.
-    f. Refreshes the target index upon completion.
+1.  Loads configuration from the `.env` file and environment variables.
+2.  Applies defaulting logic for target connection details if they are missing.
+3.  Connects to both source and target Elasticsearch clusters using the determined configurations.
+4.  Resolves the `INDEX_NAME` pattern to a list of specific indices on the source cluster.
+5.  Checks if `TARGET_INDEX_NAME` is set and validates if it's compatible with the number of source indices found.
+6.  For each source index found:
+    a. Determines the correct `targetIndexName` (either the override or the same as source).
+    b. Retrieves the index mappings and settings from the source index.
+    c. Cleans non-transferable settings.
+    d. Creates the `targetIndexName` index on the target cluster with the retrieved mappings and cleaned settings (skips if it already exists).
+    e. Uses the Scroll API on the source index to retrieve documents.
+    f. Uses the Bulk API with concurrent workers to index documents into the `targetIndexName` index.
+    g. Refreshes the target index.
 
 ## Contributing
 

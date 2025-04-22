@@ -25,33 +25,36 @@ var (
 	targetClient *elasticsearch.Client
 )
 
-// Configuration struct (optional but good practice for clarity)
+// Configuration struct
 type Config struct {
-	SourceHost     string
-	SourcePort     int
-	SourceUser     string
-	SourcePass     string
-	TargetHost     string
-	TargetPort     int
-	TargetUser     string
-	TargetPass     string
-	IndexName      string
-	BatchSize      int
-	Workers        int
-	SSLVerify      bool
-	ScrollDuration time.Duration
-	MaxRetries     int
+	SourceHost      string
+	SourcePort      int
+	SourceUser      string
+	SourcePass      string
+	TargetHost      string
+	TargetPort      int
+	TargetUser      string
+	TargetPass      string
+	IndexName       string
+	TargetIndexName string // New field for optional target index name
+	BatchSize       int
+	Workers         int
+	SSLVerify       bool
+	ScrollDuration  time.Duration
+	MaxRetries      int
 }
 
 // Helper function to get environment variables with defaults and logging
 func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
+	if value, exists := os.LookupEnv(key); exists && value != "" { // Treat empty string as not set for defaulting
 		return value
 	}
 	if fallback != "" {
-		log.Printf("Warning: Environment variable %s not set, using default: %s", key, fallback)
+		// Only log default usage if a fallback value is actually provided and used
+		// Avoid logging for optional fields where empty is acceptable before defaulting logic
+		// log.Printf("Warning: Environment variable %s not set, using default: %s", key, fallback)
 	} else {
-		log.Printf("Warning: Environment variable %s not set, no default provided", key)
+		// log.Printf("Info: Environment variable %s not set, no default provided.", key)
 	}
 	return fallback
 }
@@ -66,7 +69,7 @@ func getRequiredEnv(key string) string {
 }
 
 func main() {
-	// Load .env file. It's okay if it fails, environment variables might be set directly.
+	// Load .env file.
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("Info: No .env file found or error loading it. Relying on existing environment variables.")
@@ -74,37 +77,73 @@ func main() {
 
 	// --- Load Configuration ---
 	cfg := Config{}
+	var parseErr error
 
-	// Source Config
+	// Source Config (Required)
 	cfg.SourceHost = getRequiredEnv("SOURCE_HOST")
 	sourcePortStr := getRequiredEnv("SOURCE_PORT")
-	cfg.SourceUser = os.Getenv("SOURCE_USER") // Optional
-	cfg.SourcePass = os.Getenv("SOURCE_PASS") // Optional
-
-	// Target Config
-	cfg.TargetHost = getRequiredEnv("TARGET_HOST")
-	targetPortStr := getRequiredEnv("TARGET_PORT")
-	cfg.TargetUser = os.Getenv("TARGET_USER") // Optional
-	cfg.TargetPass = os.Getenv("TARGET_PASS") // Optional
-
-	// Cloning Config
-	cfg.IndexName = getRequiredEnv("INDEX_NAME")
-	batchSizeStr := getEnv("BATCH_SIZE", "1000")
-	workersStr := getEnv("WORKERS", "4")
-	sslVerifyStr := getEnv("SSL_VERIFY", "true")
-	scrollDurationStr := getEnv("SCROLL_DURATION", "1m") // Default scroll duration
-	maxRetriesStr := getEnv("MAX_RETRIES", "3")          // Default max retries
-
-	// Parse numeric and boolean values with error handling and defaults
-	var parseErr error
+	cfg.SourceUser = os.Getenv("SOURCE_USER")
+	cfg.SourcePass = os.Getenv("SOURCE_PASS")
 	cfg.SourcePort, parseErr = strconv.Atoi(sourcePortStr)
 	if parseErr != nil {
 		log.Fatalf("Error: Invalid SOURCE_PORT value '%s'. Must be an integer.", sourcePortStr)
 	}
-	cfg.TargetPort, parseErr = strconv.Atoi(targetPortStr)
-	if parseErr != nil {
-		log.Fatalf("Error: Invalid TARGET_PORT value '%s'. Must be an integer.", targetPortStr)
+
+	// Target Config (Optional - Defaulting Logic Applied Below)
+	targetHostStr := os.Getenv("TARGET_HOST")
+	targetPortStr := os.Getenv("TARGET_PORT")
+	targetUserStr := os.Getenv("TARGET_USER")
+	targetPassStr := os.Getenv("TARGET_PASS")
+
+	// Cloning Config
+	cfg.IndexName = getRequiredEnv("INDEX_NAME")
+	cfg.TargetIndexName = os.Getenv("TARGET_INDEX_NAME") // Optional target index name
+	batchSizeStr := getEnv("BATCH_SIZE", "1000")
+	workersStr := getEnv("WORKERS", "4")
+	sslVerifyStr := getEnv("SSL_VERIFY", "true")
+	scrollDurationStr := getEnv("SCROLL_DURATION", "1m")
+	maxRetriesStr := getEnv("MAX_RETRIES", "3")
+
+	// --- Apply Defaulting Logic for Target Connection ---
+	if targetHostStr == "" {
+		log.Println("Info: TARGET_HOST not set, defaulting to SOURCE_HOST.")
+		cfg.TargetHost = cfg.SourceHost
+	} else {
+		cfg.TargetHost = targetHostStr
 	}
+
+	if targetPortStr == "" {
+		log.Println("Info: TARGET_PORT not set, defaulting to SOURCE_PORT.")
+		cfg.TargetPort = cfg.SourcePort // Default to already parsed source port
+	} else {
+		// Parse target port if provided
+		cfg.TargetPort, parseErr = strconv.Atoi(targetPortStr)
+		if parseErr != nil {
+			log.Fatalf("Error: Invalid TARGET_PORT value '%s'. Must be an integer.", targetPortStr)
+		}
+	}
+
+	if targetUserStr == "" {
+		// Only log if source user was actually set
+		if cfg.SourceUser != "" {
+			log.Println("Info: TARGET_USER not set, defaulting to SOURCE_USER.")
+		}
+		cfg.TargetUser = cfg.SourceUser
+	} else {
+		cfg.TargetUser = targetUserStr
+	}
+
+	if targetPassStr == "" {
+		// Only log if source pass was actually set
+		if cfg.SourcePass != "" {
+			log.Println("Info: TARGET_PASS not set, defaulting to SOURCE_PASS.")
+		}
+		cfg.TargetPass = cfg.SourcePass
+	} else {
+		cfg.TargetPass = targetPassStr
+	}
+
+	// --- Parse Remaining Numeric/Boolean/Duration ---
 	cfg.BatchSize, parseErr = strconv.Atoi(batchSizeStr)
 	if parseErr != nil || cfg.BatchSize <= 0 {
 		log.Printf("Warning: Invalid BATCH_SIZE value '%s'. Using default 1000.", batchSizeStr)
@@ -132,17 +171,23 @@ func main() {
 	}
 
 	// --- Initialize Elasticsearch Clients ---
-	sourceClient, err = createEsClient(cfg.SourceHost, cfg.SourcePort, cfg.SourceUser, cfg.SourcePass, cfg.SSLVerify, cfg.MaxRetries)
+	// Note: SSLVerify applies to both clients if set
+	sourceClient, err = createEsClient("Source", cfg.SourceHost, cfg.SourcePort, cfg.SourceUser, cfg.SourcePass, cfg.SSLVerify, cfg.MaxRetries)
 	if err != nil {
 		log.Fatalf("Error creating source Elasticsearch client: %v", err)
 	}
-	targetClient, err = createEsClient(cfg.TargetHost, cfg.TargetPort, cfg.TargetUser, cfg.TargetPass, cfg.SSLVerify, cfg.MaxRetries)
+	targetClient, err = createEsClient("Target", cfg.TargetHost, cfg.TargetPort, cfg.TargetUser, cfg.TargetPass, cfg.SSLVerify, cfg.MaxRetries)
 	if err != nil {
 		log.Fatalf("Error creating target Elasticsearch client: %v", err)
 	}
 
 	log.Println("Source and target Elasticsearch clients initialized.")
-	log.Printf("Attempting to clone index pattern: %s", cfg.IndexName)
+	log.Printf("Source: %s:%d", cfg.SourceHost, cfg.SourcePort)
+	log.Printf("Target: %s:%d", cfg.TargetHost, cfg.TargetPort)
+	log.Printf("Attempting to clone source index pattern: %s", cfg.IndexName)
+	if cfg.TargetIndexName != "" {
+		log.Printf("Will attempt to clone to target index name: %s (only if source pattern matches exactly one index)", cfg.TargetIndexName)
+	}
 	log.Printf("Batch size: %d, Workers: %d", cfg.BatchSize, cfg.Workers)
 
 	// --- Start Cloning Process ---
@@ -152,50 +197,54 @@ func main() {
 }
 
 // Creates an Elasticsearch client
-func createEsClient(host string, port int, user, pass string, sslVerify bool, maxRetries int) (*elasticsearch.Client, error) {
-	cfg := elasticsearch.Config{
-		Addresses:     []string{fmt.Sprintf("http://%s:%d", host, port)}, // Start with http, adjust below
+func createEsClient(clientType, host string, port int, user, pass string, sslVerify bool, maxRetries int) (*elasticsearch.Client, error) {
+	address := fmt.Sprintf("http://%s:%d", host, port) // Default to http
+	scheme := "http"
+
+	// Determine scheme based on port, explicit SSL verification, or credentials
+	if port == 443 || sslVerify || (user != "" && pass != "") {
+		address = fmt.Sprintf("https://%s:%d", host, port)
+		scheme = "https"
+	}
+
+	esCfg := elasticsearch.Config{
+		Addresses:     []string{address},
 		Username:      user,
 		Password:      pass,
-		RetryOnStatus: []int{502, 503, 504, 429}, // Add 429 Too Many Requests
+		RetryOnStatus: []int{502, 503, 504, 429},
 		MaxRetries:    maxRetries,
-		RetryBackoff: func(i int) time.Duration { // Exponential backoff
+		RetryBackoff: func(i int) time.Duration {
 			return time.Duration(1<<uint(i)) * time.Second
 		},
 		Transport: &http.Transport{
 			MaxIdleConnsPerHost:   10,
-			ResponseHeaderTimeout: time.Second * 30, // Increased timeout
+			ResponseHeaderTimeout: time.Second * 30,
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: !sslVerify, // Use the config value
+				InsecureSkipVerify: !sslVerify,
 			},
 		},
 	}
 
-	// Determine scheme based on port or SSL verification needs
-	// Basic heuristic: use https if port is 443 or if SSL verification is explicitly enabled (even on other ports)
-	// or if username/password are provided (usually implies HTTPS needed)
-	if port == 443 || sslVerify || (user != "" && pass != "") {
-		cfg.Addresses = []string{fmt.Sprintf("https://%s:%d", host, port)}
-		log.Printf("Info: Using HTTPS for %s:%d", host, port)
-	} else {
-		log.Printf("Info: Using HTTP for %s:%d. Enable SSL_VERIFY=true or use port 443 for HTTPS.", host, port)
+	log.Printf("Info: [%s Client] Attempting connection to %s", clientType, address)
+	if !sslVerify && scheme == "https" {
+		log.Printf("Warning: [%s Client] SSL verification is disabled (SSL_VERIFY=false)", clientType)
 	}
 
-	esClient, err := elasticsearch.NewClient(cfg)
+	esClient, err := elasticsearch.NewClient(esCfg)
 	if err != nil {
-		return nil, fmt.Errorf("error creating client: %w", err)
+		return nil, fmt.Errorf("[%s Client] error creating client: %w", clientType, err)
 	}
 
 	// Test connection
 	res, err := esClient.Info()
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to %s:%d: %w", host, port, err)
+		return nil, fmt.Errorf("[%s Client] cannot connect to %s: %w", clientType, address, err)
 	}
 	defer res.Body.Close()
 	if res.IsError() {
-		return nil, fmt.Errorf("connection error to %s:%d: %s", host, port, res.String())
+		return nil, fmt.Errorf("[%s Client] connection error to %s: %s", clientType, address, res.String())
 	}
-	log.Printf("Successfully connected to Elasticsearch node: %s:%d", host, port)
+	log.Printf("[%s Client] Successfully connected to %s", clientType, address)
 	return esClient, nil
 }
 
@@ -204,7 +253,7 @@ func getSourceIndices(pattern string) ([]string, error) {
 	res, err := sourceClient.Cat.Indices(
 		sourceClient.Cat.Indices.WithIndex(pattern),
 		sourceClient.Cat.Indices.WithFormat("json"),
-		sourceClient.Cat.Indices.WithH("index"), // Only get index names
+		sourceClient.Cat.Indices.WithH("index"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cannot get source indices for pattern '%s': %w", pattern, err)
@@ -238,60 +287,71 @@ func getSourceIndices(pattern string) ([]string, error) {
 
 // Processes each index matching the pattern
 func processIndices(appCfg Config) {
-	indices, err := getSourceIndices(appCfg.IndexName)
+	sourceIndices, err := getSourceIndices(appCfg.IndexName)
 	if err != nil {
 		log.Fatalf("Failed to get source indices: %v", err)
 	}
 
-	if len(indices) == 0 {
-		log.Fatalf("No indices found matching pattern '%s' on source cluster. Aborting.", appCfg.IndexName)
+	if len(sourceIndices) == 0 {
+		log.Fatalf("No indices found matching source pattern '%s'. Aborting.", appCfg.IndexName)
 	}
 
-	for _, indexName := range indices {
-		log.Printf("--- Starting clone for index: %s ---", indexName)
-		cloneIndex(indexName, appCfg)
-		log.Printf("--- Finished clone for index: %s ---", indexName)
+	// Handle TARGET_INDEX_NAME logic
+	targetIndexNameOverride := appCfg.TargetIndexName
+	if targetIndexNameOverride != "" && len(sourceIndices) > 1 {
+		log.Fatalf("Error: TARGET_INDEX_NAME ('%s') is specified, but the source pattern '%s' matched multiple indices (%v). TARGET_INDEX_NAME can only be used when the source pattern matches exactly one index.", targetIndexNameOverride, appCfg.IndexName, sourceIndices)
+	}
+
+	for _, sourceIndexName := range sourceIndices {
+		targetIndexName := sourceIndexName // Default: target name = source name
+		if targetIndexNameOverride != "" && len(sourceIndices) == 1 {
+			targetIndexName = targetIndexNameOverride // Override if specified and only one source index
+			log.Printf("Info: Using specified target index name '%s' for source index '%s'", targetIndexName, sourceIndexName)
+		}
+
+		log.Printf("--- Starting clone: [%s] -> [%s] ---", sourceIndexName, targetIndexName)
+		cloneIndex(sourceIndexName, targetIndexName, appCfg)
+		log.Printf("--- Finished clone: [%s] -> [%s] ---", sourceIndexName, targetIndexName)
 	}
 }
 
-// Clones a single index from source to target
-func cloneIndex(indexName string, cfg Config) {
+// Clones a single source index to a target index name
+func cloneIndex(sourceIndexName, targetIndexName string, cfg Config) {
 	// 1. Get source index mapping and settings
-	mapping, settings, err := getIndexMetadata(sourceClient, indexName)
+	mapping, settings, err := getIndexMetadata(sourceClient, sourceIndexName)
 	if err != nil {
-		log.Printf("Error getting metadata for source index %s: %v. Skipping.", indexName, err)
+		log.Printf("Error getting metadata for source index %s: %v. Skipping.", sourceIndexName, err)
 		return
 	}
-	log.Printf("Retrieved mapping and settings for source index: %s", indexName)
+	log.Printf("Retrieved mapping and settings for source index: %s", sourceIndexName)
 
 	// 2. Create target index with source mapping and settings
-	err = createIndexWithMetadata(targetClient, indexName, mapping, settings)
+	err = createIndexWithMetadata(targetClient, targetIndexName, mapping, settings)
 	if err != nil {
-		// Check if the error is because the index already exists
 		if strings.Contains(err.Error(), "resource_already_exists_exception") {
-			log.Printf("Warning: Target index %s already exists. Skipping creation, will proceed to data copy.", indexName)
+			log.Printf("Warning: Target index %s already exists. Skipping creation, will proceed to data copy.", targetIndexName)
 		} else {
-			log.Printf("Error creating target index %s: %v. Skipping index.", indexName, err)
+			log.Printf("Error creating target index %s: %v. Skipping index.", targetIndexName, err)
 			return
 		}
 	} else {
-		log.Printf("Successfully created target index: %s", indexName)
+		log.Printf("Successfully created target index: %s", targetIndexName)
 	}
 
 	// 3. Scroll and bulk index data
-	err = scrollAndBulkIndex(indexName, cfg)
+	err = scrollAndBulkIndex(sourceIndexName, targetIndexName, cfg)
 	if err != nil {
-		log.Printf("Error during data copy for index %s: %v", indexName, err)
+		log.Printf("Error during data copy for index %s -> %s: %v", sourceIndexName, targetIndexName, err)
 	} else {
-		log.Printf("Data copy finished for index %s", indexName)
+		log.Printf("Data copy finished for index %s -> %s", sourceIndexName, targetIndexName)
 	}
 
 	// 4. Refresh target index
-	err = refreshIndex(targetClient, indexName)
+	err = refreshIndex(targetClient, targetIndexName)
 	if err != nil {
-		log.Printf("Warning: Failed to refresh target index %s: %v", indexName, err)
+		log.Printf("Warning: Failed to refresh target index %s: %v", targetIndexName, err)
 	} else {
-		log.Printf("Target index %s refreshed.", indexName)
+		log.Printf("Target index %s refreshed.", targetIndexName)
 	}
 }
 
@@ -300,7 +360,6 @@ func getIndexMetadata(client *elasticsearch.Client, indexName string) (map[strin
 	res, err := client.Indices.Get(
 		[]string{indexName},
 		client.Indices.Get.WithContext(context.Background()),
-		// client.Indices.Get.WithIncludeDefaults(true), // Might include too much? Test if needed.
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error getting index metadata request: %w", err)
@@ -324,13 +383,12 @@ func getIndexMetadata(client *elasticsearch.Client, indexName string) (map[strin
 	mappings, _ := indexData["mappings"].(map[string]interface{})
 	settingsData, _ := indexData["settings"].(map[string]interface{})
 
-	// Clean settings: remove index-specific, non-transferable settings
 	cleanedSettings := cleanSettings(settingsData)
 
 	return mappings, cleanedSettings, nil
 }
 
-// Cleans settings obtained from the source index to make them suitable for creating a new index
+// Cleans settings obtained from the source index
 func cleanSettings(settingsData map[string]interface{}) map[string]interface{} {
 	if settingsData == nil {
 		return nil
@@ -339,16 +397,12 @@ func cleanSettings(settingsData map[string]interface{}) map[string]interface{} {
 	indexSettings, ok := settingsData["index"].(map[string]interface{})
 	if !ok {
 		log.Println("Warning: Could not find 'index' key in settings, returning settings as is.")
-		return settingsData // Return original if structure is unexpected
+		return settingsData
 	}
 
-	// Settings to remove - these are assigned at creation or managed by Elasticsearch
 	keysToRemove := []string{
-		"creation_date",
-		"uuid",
-		"version",
-		"provided_name",
-		"created", // Often nested under version
+		"creation_date", "uuid", "version", "provided_name", "created",
+		"routing.allocation.include._tier_preference", // Often causes issues if target doesn't have same tiers
 	}
 
 	cleanedIndexSettings := make(map[string]interface{})
@@ -360,44 +414,38 @@ func cleanSettings(settingsData map[string]interface{}) map[string]interface{} {
 				break
 			}
 		}
-		// Also remove the 'version' map entirely if it exists
-		if key == "version" {
+		if key == "version" { // Remove the nested version map
 			remove = true
 		}
-
 		if !remove {
 			cleanedIndexSettings[key] = value
 		}
 	}
 
-	// Return settings structure compatible with create index API (needs the "index" wrapper)
 	return map[string]interface{}{
 		"index": cleanedIndexSettings,
 	}
 }
 
 // Creates an index on the target client with the given mapping and settings
-func createIndexWithMetadata(client *elasticsearch.Client, indexName string, mapping map[string]interface{}, settings map[string]interface{}) error {
+func createIndexWithMetadata(client *elasticsearch.Client, targetIndexName string, mapping map[string]interface{}, settings map[string]interface{}) error {
 	createBody := map[string]interface{}{}
 	if mapping != nil && len(mapping) > 0 {
 		createBody["mappings"] = mapping
 	}
-	if settings != nil && len(settings) > 0 {
-		// Use the potentially cleaned settings directly (which should already have the "index" key if cleaning worked)
-		// Or, if cleaning failed or wasn't needed, ensure the structure is correct.
-		if _, ok := settings["index"]; ok {
+	if settings != nil {
+		// Check if settings has the 'index' key after cleaning
+		if indexSettings, ok := settings["index"]; ok && len(indexSettings.(map[string]interface{})) > 0 {
 			createBody["settings"] = settings
-		} else if len(settings) > 0 {
-			// If 'index' key is missing, wrap the settings - this might happen if cleanSettings bypassed cleaning
-			log.Println("Info: Wrapping settings under 'index' key for create index request.")
+		} else if !ok && len(settings) > 0 {
+			// Fallback if cleaning somehow removed the 'index' key but settings remain
+			log.Println("Info: Wrapping non-standard settings under 'index' key for create index request.")
 			createBody["settings"] = map[string]interface{}{"index": settings}
 		}
 	}
 
-	// Only proceed if there's actually something to create (mapping or settings)
 	if len(createBody) == 0 {
-		log.Printf("Info: No mapping or settings provided for index %s. Creating with defaults.", indexName)
-		// Allow ES to create with defaults if neither mapping nor settings are present
+		log.Printf("Info: No mapping or transferable settings found/provided for target index %s. Creating with defaults.", targetIndexName)
 	}
 
 	bodyBytes, err := json.Marshal(createBody)
@@ -405,207 +453,196 @@ func createIndexWithMetadata(client *elasticsearch.Client, indexName string, map
 		return fmt.Errorf("error marshaling create index request body: %w", err)
 	}
 
-	log.Printf("Creating target index %s with body: %s", indexName, string(bodyBytes))
+	// Log cautiously - might contain sensitive mapping data? Maybe just log keys?
+	// log.Printf("Creating target index %s with body: %s", targetIndexName, string(bodyBytes))
+	log.Printf("Creating target index %s with mappings and settings...", targetIndexName)
 
 	res, err := client.Indices.Create(
-		indexName,
+		targetIndexName,
 		client.Indices.Create.WithContext(context.Background()),
 		client.Indices.Create.WithBody(bytes.NewReader(bodyBytes)),
 	)
 
 	if err != nil {
-		return fmt.Errorf("error in create index request for %s: %w", indexName, err)
+		return fmt.Errorf("error in create index request for %s: %w", targetIndexName, err)
 	}
 	defer res.Body.Close()
 
-	// Check specifically for acknowledgment, but handle errors generally
 	if res.IsError() {
-		return fmt.Errorf("error response creating index %s: %s", indexName, res.String())
+		return fmt.Errorf("error response creating index %s: %s", targetIndexName, res.String())
 	}
 
-	// Decode response to check for acknowledgment (optional but good)
 	var createResponse map[string]interface{}
 	if err := json.NewDecoder(res.Body).Decode(&createResponse); err != nil {
-		log.Printf("Warning: Could not decode create index response for %s: %v", indexName, err)
-		// Don't fail here, the request might have succeeded without ack being parsed
+		log.Printf("Warning: Could not decode create index response for %s: %v", targetIndexName, err)
 	} else {
 		acknowledged, _ := createResponse["acknowledged"].(bool)
 		if !acknowledged {
-			log.Printf("Warning: Create index request for %s was not acknowledged by all nodes.", indexName)
+			log.Printf("Warning: Create index request for %s was not acknowledged by all nodes.", targetIndexName)
 		}
 	}
 
 	return nil
 }
 
-// Scrolls through source index and bulk indexes data into the target
-func scrollAndBulkIndex(indexName string, cfg Config) error {
+// Scrolls through source index and bulk indexes data into the target index name
+func scrollAndBulkIndex(sourceIndexName, targetIndexName string, cfg Config) error {
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	docChan := make(chan json.RawMessage, cfg.BatchSize*cfg.Workers) // Buffered channel
+	// Buffer size slightly larger to prevent blocking scroll while workers process
+	docChan := make(chan json.RawMessage, cfg.BatchSize*(cfg.Workers+1))
 
-	log.Printf("Starting scroll for index %s with batch size %d", indexName, cfg.BatchSize)
+	log.Printf("Starting scroll for source index %s with batch size %d", sourceIndexName, cfg.BatchSize)
 
-	// Start initial scroll request
 	res, err := sourceClient.Search(
-		sourceClient.Search.WithIndex(indexName),
+		sourceClient.Search.WithIndex(sourceIndexName),
 		sourceClient.Search.WithSize(cfg.BatchSize),
 		sourceClient.Search.WithScroll(cfg.ScrollDuration),
 		sourceClient.Search.WithContext(ctx),
-		sourceClient.Search.WithBody(strings.NewReader(`{"query": {"match_all": {}}}`)), // Fetch all documents
-		sourceClient.Search.WithSort("_doc"),                                            // Use efficient _doc sort order
+		sourceClient.Search.WithBody(strings.NewReader(`{"query": {"match_all": {}}}`)),
+		sourceClient.Search.WithSort("_doc"),
 	)
 	if err != nil {
-		return fmt.Errorf("initial scroll request failed: %w", err)
+		return fmt.Errorf("initial scroll request failed for %s: %w", sourceIndexName, err)
 	}
 
 	var scrollID string
 	var totalHits int64
+	var docsInBatch int
 
-	// Process initial batch
-	scrollID, totalHits, err = processScrollResponse(res, docChan)
+	scrollID, totalHits, docsInBatch, err = processScrollResponse(res, docChan)
 	if err != nil {
-		return fmt.Errorf("processing initial scroll batch failed: %w", err)
+		return fmt.Errorf("processing initial scroll batch failed for %s: %w", sourceIndexName, err)
 	}
 	if totalHits == 0 {
-		log.Printf("Info: Index %s contains no documents to clone.", indexName)
-		close(docChan) // Ensure channel is closed even if no docs
-		return nil     // Nothing more to do
+		log.Printf("Info: Source index %s contains no documents to clone.", sourceIndexName)
+		close(docChan)
+		clearScroll(sourceClient, scrollID) // Clear scroll even if no hits
+		return nil
 	}
 
-	log.Printf("Total documents to process for index %s: %d", indexName, totalHits)
-	processedCount := int64(len(docChan)) // Count docs from initial batch already in channel
+	log.Printf("Total documents to process for index %s: %d", sourceIndexName, totalHits)
+	processedCount := int64(docsInBatch)
 
-	// Start worker goroutines for bulk indexing
 	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
-		go bulkWorker(i, indexName, docChan, &wg, cfg.BatchSize)
+		go bulkWorker(i, targetIndexName, docChan, &wg, cfg.BatchSize)
 	}
 
-	// Continue scrolling
 	for scrollID != "" {
-		log.Printf("Processed %d / %d documents...", processedCount, totalHits)
+		log.Printf("Processed approx %d / %d documents for %s...", processedCount, totalHits, sourceIndexName)
 		res, err := sourceClient.Scroll(
 			sourceClient.Scroll.WithScrollID(scrollID),
 			sourceClient.Scroll.WithScroll(cfg.ScrollDuration),
 			sourceClient.Scroll.WithContext(ctx),
 		)
 		if err != nil {
-			// Attempt to clear scroll before returning error
 			clearScroll(sourceClient, scrollID)
-			return fmt.Errorf("subsequent scroll request failed: %w", err)
+			return fmt.Errorf("subsequent scroll request failed for %s: %w", sourceIndexName, err)
 		}
 
-		var currentBatchSize int
-		scrollID, _, err = processScrollResponse(res, docChan) // Total hits isn't needed after first batch
+		scrollID, _, docsInBatch, err = processScrollResponse(res, docChan)
 		if err != nil {
-			clearScroll(sourceClient, scrollID) // Attempt to clear scroll even on processing error
-			return fmt.Errorf("processing subsequent scroll batch failed: %w", err)
+			clearScroll(sourceClient, scrollID)
+			return fmt.Errorf("processing subsequent scroll batch failed for %s: %w", sourceIndexName, err)
 		}
 
-		// Estimate processed count - relies on channel buffer size knowledge
-		// A more accurate count would require atomic counters updated by workers
-		processedCount += int64(currentBatchSize) // Add size of the batch just processed
+		processedCount += int64(docsInBatch)
 
-		// If scrollID becomes empty, it means we've reached the end
-		if scrollID == "" {
+		if docsInBatch == 0 { // End of scroll implicitly
+			log.Printf("Scroll finished for %s (empty batch received).", sourceIndexName)
 			break
 		}
 	}
 
-	// Attempt to clear the last scroll ID
 	if scrollID != "" {
 		clearScroll(sourceClient, scrollID)
 	}
 
-	log.Println("Finished scrolling, closing document channel.")
-	close(docChan) // Signal workers that no more documents are coming
+	log.Println("Finished scrolling, closing document channel for", sourceIndexName)
+	close(docChan)
 
-	log.Println("Waiting for bulk workers to finish...")
-	wg.Wait() // Wait for all workers to complete processing remaining docs
+	log.Println("Waiting for bulk workers to finish for index", sourceIndexName)
+	wg.Wait()
 
-	log.Println("All bulk workers finished.")
+	log.Println("All bulk workers finished for index", sourceIndexName)
 	return nil
 }
 
-// Processes a scroll response, sends documents to the channel, returns scroll ID and total hits
-func processScrollResponse(res *esapi.Response, docChan chan<- json.RawMessage) (string, int64, error) {
+// Processes a scroll response, sends documents to the channel, returns scroll ID, total hits, docs in this batch
+func processScrollResponse(res *esapi.Response, docChan chan<- json.RawMessage) (string, int64, int, error) {
 	defer res.Body.Close()
 	if res.IsError() {
-		return "", 0, fmt.Errorf("scroll response error: %s", res.String())
+		return "", 0, 0, fmt.Errorf("scroll response error: %s", res.String())
 	}
 
 	var r map[string]interface{}
 	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
-		return "", 0, fmt.Errorf("error decoding scroll response: %w", err)
+		return "", 0, 0, fmt.Errorf("error decoding scroll response: %w", err)
 	}
 
 	newScrollID, _ := r["_scroll_id"].(string)
+	docsInThisBatch := 0
+	var totalHits int64 // Only populated meaningfully on first call
 
-	// Extract total hits only from the initial response if possible
-	var totalHits int64
 	if hitsData, ok := r["hits"].(map[string]interface{}); ok {
 		if total, ok := hitsData["total"].(map[string]interface{}); ok {
-			if value, ok := total["value"].(float64); ok { // JSON numbers are float64
+			if value, ok := total["value"].(float64); ok {
 				totalHits = int64(value)
 			}
 		}
-		// Extract documents
 		hits, ok := hitsData["hits"].([]interface{})
 		if ok {
+			docsInThisBatch = len(hits)
 			for _, hit := range hits {
 				hitMap, ok := hit.(map[string]interface{})
 				if !ok {
-					log.Println("Warning: Could not parse hit structure")
 					continue
 				}
 
-				// Prepare document for bulk index: needs _index, _id, _source
 				doc := map[string]interface{}{
-					"_index":  hitMap["_index"],
+					"_index":  hitMap["_index"], // Keep original source index here for potential debugging
 					"_id":     hitMap["_id"],
 					"_source": hitMap["_source"],
 				}
-
 				docBytes, err := json.Marshal(doc)
 				if err != nil {
-					log.Printf("Warning: Failed to marshal document %s: %v", hitMap["_id"], err)
 					continue
 				}
 				docChan <- json.RawMessage(docBytes)
 			}
-			return newScrollID, totalHits, nil // Return after processing hits
 		}
 	}
 
-	// Return scroll ID even if hits processing failed or no hits found in this batch
-	return newScrollID, 0, nil // Return 0 total hits if not found in this response
+	// If scroll ID is missing/empty in response, means scroll is finished
+	if newScrollID == "" && docsInThisBatch > 0 {
+		// This case shouldn't normally happen if ES behaves, but good to know
+		log.Println("Warning: Received non-empty batch but no scroll ID in response. Assuming scroll ended.")
+	}
+
+	return newScrollID, totalHits, docsInThisBatch, nil
 }
 
-// Worker goroutine for bulk indexing
-func bulkWorker(id int, indexName string, docChan <-chan json.RawMessage, wg *sync.WaitGroup, batchSize int) {
+// Worker goroutine for bulk indexing to the specified target index
+func bulkWorker(id int, targetIndexName string, docChan <-chan json.RawMessage, wg *sync.WaitGroup, batchSize int) {
 	defer wg.Done()
-	log.Printf("[Worker %d] Starting", id)
+	log.Printf("[Worker %d] Starting for target index %s", id, targetIndexName)
 
 	var buffer bytes.Buffer
 	var docsInBatch int
 
 	for docBytes := range docChan {
-		// Each bulk request item needs two lines: action metadata + document source
 		meta := map[string]interface{}{
 			"index": map[string]interface{}{
-				"_index": indexName,
-				// Extract _id from the docBytes (which contains _index, _id, _source)
-				"_id": extractID(docBytes),
+				"_index": targetIndexName, // Use the target index name here
+				"_id":    extractID(docBytes),
 			},
 		}
-		metaBytes, _ := json.Marshal(meta) // Error handling omitted for brevity
+		metaBytes, _ := json.Marshal(meta)
 
-		// Append action metadata line
 		buffer.Write(metaBytes)
 		buffer.WriteByte('\n')
 
-		// Append document source line (_source only)
 		sourceBytes := extractSource(docBytes)
 		buffer.Write(sourceBytes)
 		buffer.WriteByte('\n')
@@ -613,23 +650,21 @@ func bulkWorker(id int, indexName string, docChan <-chan json.RawMessage, wg *sy
 		docsInBatch++
 
 		if docsInBatch >= batchSize {
-			sendBulkRequest(id, &buffer)
-			// Reset buffer and counter after sending
+			sendBulkRequest(id, targetIndexName, &buffer)
 			buffer.Reset()
 			docsInBatch = 0
 		}
 	}
 
-	// Send any remaining documents in the buffer after the channel closes
 	if buffer.Len() > 0 {
-		log.Printf("[Worker %d] Sending final batch of %d docs", id, docsInBatch)
-		sendBulkRequest(id, &buffer)
+		log.Printf("[Worker %d] Sending final batch of %d docs to %s", id, docsInBatch, targetIndexName)
+		sendBulkRequest(id, targetIndexName, &buffer)
 	}
 
-	log.Printf("[Worker %d] Finished", id)
+	log.Printf("[Worker %d] Finished for target index %s", id, targetIndexName)
 }
 
-// Helper to extract _id (assumes docBytes has {"_id": "...", ...})
+// Helper to extract _id
 func extractID(docBytes json.RawMessage) string {
 	var doc map[string]interface{}
 	if err := json.Unmarshal(docBytes, &doc); err == nil {
@@ -637,15 +672,14 @@ func extractID(docBytes json.RawMessage) string {
 			return id
 		}
 	}
-	return "" // Should not happen if processScrollResponse worked correctly
+	return ""
 }
 
-// Helper to extract _source (assumes docBytes has {"_source": {...}, ...})
+// Helper to extract _source
 func extractSource(docBytes json.RawMessage) json.RawMessage {
 	var doc map[string]interface{}
 	if err := json.Unmarshal(docBytes, &doc); err == nil {
 		if source, ok := doc["_source"]; ok {
-			// Re-marshal just the source part
 			sourceBytes, err := json.Marshal(source)
 			if err == nil {
 				return json.RawMessage(sourceBytes)
@@ -653,11 +687,11 @@ func extractSource(docBytes json.RawMessage) json.RawMessage {
 		}
 	}
 	log.Println("Warning: Could not extract _source from document")
-	return json.RawMessage("{}") // Return empty object if extraction fails
+	return json.RawMessage("{}")
 }
 
-// Sends a bulk request to the target cluster
-func sendBulkRequest(workerID int, buffer *bytes.Buffer) {
+// Sends a bulk request to the target cluster for a specific index
+func sendBulkRequest(workerID int, targetIndexName string, buffer *bytes.Buffer) {
 	if buffer.Len() == 0 {
 		return
 	}
@@ -665,35 +699,28 @@ func sendBulkRequest(workerID int, buffer *bytes.Buffer) {
 	res, err := targetClient.Bulk(
 		bytes.NewReader(buffer.Bytes()),
 		targetClient.Bulk.WithContext(context.Background()),
+		// Optional: Can specify target index here too, but action metadata should handle it
+		// targetClient.Bulk.WithIndex(targetIndexName),
 	)
 
 	if err != nil {
-		log.Printf("[Worker %d] Error sending bulk request: %v", workerID, err)
-		// Consider adding retry logic here
+		log.Printf("[Worker %d] Error sending bulk request to %s: %v", workerID, targetIndexName, err)
 		return
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
-		log.Printf("[Worker %d] Error response from bulk request: %s", workerID, res.String())
-		// Consider logging the failing bulk payload (buffer.String()) for debugging
-		// but be mindful of sensitive data and log size.
+		log.Printf("[Worker %d] Error response from bulk request to %s: %s", workerID, targetIndexName, res.String())
 	} else {
-		// Optional: Check response body for item-level errors
 		var bulkResponse map[string]interface{}
 		if err := json.NewDecoder(res.Body).Decode(&bulkResponse); err == nil {
 			if errors, ok := bulkResponse["errors"].(bool); ok && errors {
-				log.Printf("[Worker %d] Bulk request completed with item-level errors. See Elasticsearch logs for details.", workerID)
-				// Optionally log specific errors if needed, but can be verbose
-				// logFailedBulkItems(bulkResponse)
-			} else {
-				// log.Printf("[Worker %d] Bulk request successful.", workerID) // Can be too noisy
+				log.Printf("[Worker %d] Bulk request to %s completed with item-level errors.", workerID, targetIndexName)
 			}
 		} else {
-			log.Printf("[Worker %d] Warning: Could not decode bulk response: %v", workerID, err)
+			log.Printf("[Worker %d] Warning: Could not decode bulk response for %s: %v", workerID, targetIndexName, err)
 		}
 	}
-
 }
 
 // Clears a scroll context on the source cluster
@@ -701,62 +728,34 @@ func clearScroll(client *elasticsearch.Client, scrollID string) {
 	if scrollID == "" {
 		return
 	}
-	log.Printf("Clearing scroll ID: %s", scrollID)
+	// log.Printf("Clearing scroll ID: %s", scrollID) // Can be noisy
 	res, err := client.ClearScroll(
 		client.ClearScroll.WithScrollID(scrollID),
 		client.ClearScroll.WithContext(context.Background()),
 	)
 	if err != nil {
 		log.Printf("Warning: Failed to clear scroll context %s: %v", scrollID, err)
-	} else {
+	} else if res != nil {
 		defer res.Body.Close()
 		if res.IsError() {
-			log.Printf("Warning: Error response clearing scroll context %s: %s", scrollID, res.String())
-		} else {
-			log.Printf("Successfully cleared scroll ID: %s", scrollID)
+			// log.Printf("Warning: Error response clearing scroll context %s: %s", scrollID, res.String())
 		}
 	}
 }
 
 // Refreshes the target index to make changes visible
-func refreshIndex(client *elasticsearch.Client, indexName string) error {
-	log.Printf("Refreshing target index: %s", indexName)
+func refreshIndex(client *elasticsearch.Client, targetIndexName string) error {
+	log.Printf("Refreshing target index: %s", targetIndexName)
 	res, err := client.Indices.Refresh(
-		client.Indices.Refresh.WithIndex(indexName),
+		client.Indices.Refresh.WithIndex(targetIndexName),
 		client.Indices.Refresh.WithContext(context.Background()),
 	)
 	if err != nil {
-		return fmt.Errorf("refresh request failed for index %s: %w", indexName, err)
+		return fmt.Errorf("refresh request failed for index %s: %w", targetIndexName, err)
 	}
 	defer res.Body.Close()
 	if res.IsError() {
-		return fmt.Errorf("error response refreshing index %s: %s", indexName, res.String())
+		return fmt.Errorf("error response refreshing index %s: %s", targetIndexName, res.String())
 	}
 	return nil
-}
-
-func logFailedBulkItems(bulkResponse map[string]interface{}) {
-	items, ok := bulkResponse["items"].([]interface{})
-	if !ok {
-		return
-	}
-	for _, item := range items {
-		itemMap, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		for _, action := range []string{"index", "create", "update", "delete"} {
-			if actionResult, ok := itemMap[action].(map[string]interface{}); ok {
-				if errorInfo, exists := actionResult["error"]; exists {
-					log.Printf("  - Bulk item failed: Action=%s, ID=%v, Status=%v, Error=%v",
-						action,
-						actionResult["_id"],
-						actionResult["status"],
-						errorInfo)
-				}
-				break
-			}
-		}
-	}
 }
