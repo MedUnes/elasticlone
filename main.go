@@ -1,180 +1,279 @@
 package main
 
 import (
-	"context"
+	"bufio"
 	"crypto/tls"
-	"flag"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
-
-	"github.com/olivere/elastic/v7"
 )
 
-const (
-	batchSize  = 10000
-	retryCount = 3
-	retryDelay = 5 * time.Second
-)
+type Index struct {
+	Settings map[string]interface{} `json:"settings"`
+	Mappings map[string]interface{} `json:"mappings"`
+}
 
-type ElasticConfig struct {
-	URL   string
-	Index string
-	User  string
-	Pass  string
+type ReindexTask struct {
+	Task string `json:"task"`
+}
+
+type TaskStatus struct {
+	Completed bool `json:"completed"`
+}
+
+func loadConfig(path string) (map[string]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	config := make(map[string]string)
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid line: %s", line)
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		config[key] = value
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+func parseBoolConfig(config map[string]string, key string, defaultValue bool) (bool, error) {
+	if val, ok := config[key]; ok {
+		result, err := strconv.ParseBool(val)
+		if err != nil {
+			return defaultValue, fmt.Errorf("invalid value for %s: %v", key, err)
+		}
+		return result, nil
+	}
+	return defaultValue, nil
 }
 
 func main() {
-	srcUser := flag.String("U", "", "Source username")
-	srcPass := flag.String("P", "", "Source password")
-	srcHost := flag.String("H", "", "Source host")
-	srcPort := flag.String("R", "", "Source port")
-	srcSSL := flag.Bool("S", false, "Use SSL/HTTPS for source")
-	srcIndex := flag.String("I", "", "Source index name")
-	srcInsecure := flag.Bool("insecure", false, "Skip SSL certificate verification for source")
-	fromDoc := flag.Int("F", 1, "Start copying from this document number (1-indexed)")
-	toDoc := flag.Int("T", 0, "Stop copying at this document number (0 for no limit)")
-
-	destUser := flag.String("u", "", "Target username")
-	destPass := flag.String("p", "", "Target password")
-	destHost := flag.String("h", "", "Target host")
-	destPort := flag.String("r", "", "Target port")
-	destSSL := flag.Bool("s", false, "Use SSL/HTTPS for target")
-	destIndex := flag.String("i", "", "Target index name")
-
-	flag.Parse()
-
-	if *srcHost == "" || *destHost == "" || *srcIndex == "" || *destIndex == "" {
-		fmt.Println("Missing required parameters. Please provide host and index information for both source and destination.")
-		flag.Usage()
-		return
-	}
-
-	srcScheme := "http"
-	if *srcSSL {
-		srcScheme = "https"
-	}
-	destScheme := "http"
-	if *destSSL {
-		destScheme = "https"
-	}
-
-	srcURL := fmt.Sprintf("%s://%s:%s@%s:%s", srcScheme, *srcUser, *srcPass, *srcHost, *srcPort)
-	destURL := fmt.Sprintf("%s://%s:%s@%s:%s", destScheme, *destUser, *destPass, *destHost, *destPort)
-
-	sourceConfig := ElasticConfig{URL: srcURL, Index: *srcIndex, User: *srcUser, Pass: *srcPass}
-	destinationConfig := ElasticConfig{URL: destURL, Index: *destIndex, User: *destUser, Pass: *destPass}
-
-	sourceClient, err := CreateClient(sourceConfig, *srcInsecure, true)
+	config, err := loadConfig("auth.conf")
 	if err != nil {
-		log.Fatalf("Error creating source client: %v", err)
-	}
-	destClient, err := CreateClient(destinationConfig, false, true)
-	if err != nil {
-		log.Fatalf("Error creating destination client: %v", err)
+		log.Fatalf("Error loading config: %v", err)
 	}
 
-	ensureIndex(context.Background(), destClient, *destIndex)
-
-	actualTotalDocs, err := getTotalDocumentCount(sourceClient, *srcIndex)
-	if err != nil {
-		log.Fatalf("Error getting total document count: %v", err)
+	requiredKeys := []string{"SOURCE_URL", "SOURCE_USER", "SOURCE_PASS", "DEST_URL", "DEST_USER", "DEST_PASS"}
+	for _, key := range requiredKeys {
+		if _, ok := config[key]; !ok {
+			log.Fatalf("missing required configuration key: %s", key)
+		}
 	}
 
-	if *toDoc == 0 || *toDoc > actualTotalDocs {
-		*toDoc = actualTotalDocs
+	localPort := "9200"
+	if lp, ok := config["LOCAL_PORT"]; ok {
+		localPort = lp
 	}
 
-	if err := copyData(context.Background(), sourceClient, destClient, sourceConfig, *destIndex, *fromDoc, *toDoc); err != nil {
-		log.Fatalf("Error copying data: %v", err)
-	}
-	fmt.Println("\nData migration completed successfully.")
-}
+	copyMappings, _ := parseBoolConfig(config, "COPY_MAPPINGS", true)
+	copyData, _ := parseBoolConfig(config, "COPY_DATA", true)
+	copyTasks, _ := parseBoolConfig(config, "COPY_TASKS", false)
+	copyPipelines, _ := parseBoolConfig(config, "COPY_PIPELINES", false)
+	insecure, _ := parseBoolConfig(config, "INSECURE", false)
+	debug, _ := parseBoolConfig(config, "DEBUG", false)
 
-func CreateClient(cfg ElasticConfig, insecure bool, forceHttp1 bool) (*elastic.Client, error) {
-	options := []elastic.ClientOptionFunc{
-		elastic.SetURL(cfg.URL),
-		elastic.SetBasicAuth(cfg.User, cfg.Pass),
-		elastic.SetSniff(false),
-	}
-
-	if insecure || forceHttp1 {
-		httpClient := &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
-				TLSNextProto:    map[string]func(string, *tls.Conn) http.RoundTripper{},
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: insecure,
 			},
+		},
+	}
+
+	target, _ := url.Parse(config["DEST_URL"])
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = httpClient.Transport
+
+	destAuth := &url.UserPassword{
+		Username: config["DEST_USER"],
+		Password: config["DEST_PASS"],
+	}
+	target.User = destAuth
+
+	sourceAuth := &url.UserPassword{
+		Username: config["SOURCE_USER"],
+		Password: config["SOURCE_PASS"],
+	}
+	sourceURL, _ := url.Parse(config["SOURCE_URL"])
+	sourceURL.User = sourceAuth
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if debug {
+			log.Printf("Proxying request to: %s", r.URL.Path)
 		}
-		options = append(options, elastic.SetHttpClient(httpClient))
-	}
+		proxy.ServeHTTP(w, r)
+	})
 
-	return elastic.NewClient(options...)
-}
+	http.HandleFunc("/clone-indices", func(w http.ResponseWriter, r *http.Request) {
+		if debug {
+			log.Println("Starting index cloning process")
+		}
 
-func ensureIndex(ctx context.Context, client *elastic.Client, index string) {
-	exists, err := client.IndexExists(index).Do(ctx)
-	if err != nil {
-		log.Fatalf("Error checking if index exists: %v", err)
-	}
-	if !exists {
-		_, err = client.CreateIndex(index).Do(ctx)
+		resp, err := httpClient.Get(sourceURL.String() + "/_cat/indices?format=json")
 		if err != nil {
-			log.Fatalf("Error creating index: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-	}
-}
+		defer resp.Body.Close()
 
-func getTotalDocumentCount(client *elastic.Client, index string) (int, error) {
-	countService := client.Count(index)
-	count, err := countService.Do(context.Background())
-	if err != nil {
-		return 0, err
-	}
-	return int(count), nil
-}
-
-func copyData(ctx context.Context, sourceClient, destClient *elastic.Client, srcConfig ElasticConfig, destIndex string, fromDoc int, toDoc int) error {
-	totalDocs := toDoc - fromDoc + 1
-
-	query := elastic.NewMatchAllQuery()
-	scroll := sourceClient.Scroll(srcConfig.Index).Query(query).Size(batchSize)
-
-	copiedDocs := 0
-
-	for {
-		results, err := scroll.Do(ctx)
-		if err != nil {
-			return fmt.Errorf("error retrieving results: %v", err)
-		}
-		if len(results.Hits.Hits) == 0 {
-			break
+		var indices []map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&indices); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		bulkRequest := destClient.Bulk()
-		for _, hit := range results.Hits.Hits {
-			copiedDocs++
-			if copiedDocs < fromDoc {
+		for _, indexInfo := range indices {
+			indexName := indexInfo["index"].(string)
+			if strings.HasPrefix(indexName, ".") && !copyTasks {
 				continue
 			}
-			if toDoc != 0 && copiedDocs > toDoc {
-				break
+
+			if debug {
+				log.Printf("Processing index: %s", indexName)
 			}
-			req := elastic.NewBulkIndexRequest().Index(destIndex).Id(hit.Id).Doc(hit.Source)
-			bulkRequest = bulkRequest.Add(req)
+
+			if copyMappings {
+				resp, err := httpClient.Get(fmt.Sprintf("%s/%s", sourceURL.String(), indexName))
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				defer resp.Body.Close()
+
+				var index Index
+				if err := json.NewDecoder(resp.Body).Decode(&index); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+
+				reqBody, _ := json.Marshal(index)
+				req, _ := http.NewRequest("PUT", fmt.Sprintf("%s/%s", config["DEST_URL"], indexName), strings.NewReader(string(reqBody)))
+				req.SetBasicAuth(config["DEST_USER"], config["DEST_PASS"])
+				req.Header.Add("Content-Type", "application/json")
+
+				resp, err = httpClient.Do(req)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				resp.Body.Close()
+			}
+
+			if copyData {
+				if debug {
+					log.Printf("Copying data for index: %s", indexName)
+				}
+
+				reindexBody := fmt.Sprintf(`{
+					"source": {
+						"remote": {
+							"host": "%s",
+							"username": "%s",
+							"password": "%s"
+						},
+						"index": "%s"
+					},
+					"dest": {
+						"index": "%s"
+					}
+				}`, sourceURL.String(), config["SOURCE_USER"], config["SOURCE_PASS"], indexName, indexName)
+
+				req, _ := http.NewRequest("POST", config["DEST_URL"]+"/_reindex?wait_for_completion=false", strings.NewReader(reindexBody))
+				req.SetBasicAuth(config["DEST_USER"], config["DEST_PASS"])
+				req.Header.Add("Content-Type", "application/json")
+
+				resp, err := httpClient.Do(req)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+
+				var task ReindexTask
+				json.NewDecoder(resp.Body).Decode(&task)
+				resp.Body.Close()
+
+				for {
+					time.Sleep(5 * time.Second)
+					taskResp, err := httpClient.Get(fmt.Sprintf("%s/_tasks/%s", config["DEST_URL"], task.Task))
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+
+					var status TaskStatus
+					json.NewDecoder(taskResp.Body).Decode(&status)
+					taskResp.Body.Close()
+
+					if status.Completed {
+						break
+					}
+				}
+			}
 		}
 
-		if bulkRequest.NumberOfActions() > 0 {
-			if _, err := bulkRequest.Do(ctx); err != nil {
-				return fmt.Errorf("error bulk indexing: %v", err)
+		if copyPipelines {
+			if debug {
+				log.Println("Copying ingest pipelines")
+			}
+
+			resp, err := httpClient.Get(sourceURL.String() + "/_ingest/pipeline")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			defer resp.Body.Close()
+
+			var pipelines map[string]interface{}
+			if err := json.NewDecoder(resp.Body).Decode(&pipelines); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			for name, pipeline := range pipelines {
+				body, _ := json.Marshal(pipeline)
+				req, _ := http.NewRequest("PUT", fmt.Sprintf("%s/_ingest/pipeline/%s", config["DEST_URL"], name), strings.NewReader(string(body)))
+				req.SetBasicAuth(config["DEST_USER"], config["DEST_PASS"])
+				req.Header.Add("Content-Type", "application/json")
+
+				resp, err := httpClient.Do(req)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
 			}
 		}
 
-		if toDoc != 0 && copiedDocs >= toDoc {
-			break
-		}
-		fmt.Fprintf(os.Stdout, "\rProgress: Copied %d/%d documents (%.2f%%)", copiedDocs-fromDoc+1, totalDocs, float64(copiedDocs-fromDoc+1)*100/float64(totalDocs))
-	}
-	return nil
+		fmt.Fprintf(w, "Cloning process completed!\n")
+	})
+
+	log.Printf("Server running on port %s", localPort)
+	log.Fatal(http.ListenAndServe(":"+localPort, nil))
 }

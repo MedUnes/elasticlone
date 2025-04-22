@@ -1,41 +1,63 @@
-# elasticlone
-A tiny CLI tool to clone elastic search  indexes
+# Elasticlone
 
-[![Build](https://github.com/MedUnes/elasticlone/actions/workflows/test.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/test.yml) [![Release](https://github.com/MedUnes/elasticlone/actions/workflows/release.yml/badge.svg)](https://github.com/MedUnes/elasticlone/actions/workflows/release.yml)
+Elasticsearch data replication tool with automatic proxy server.
 
-## Build
-```bahs
-go build
-```
+## Features
+- Copies indices, mappings, and data between Elasticsearch clusters
+- Configurable via configuration file
+- Local proxy server for data redirection
+- SSL support with certificate verification toggle
+
 ## Usage
+
+1. Create a configuration file named `auth.conf`, or copy it from the dist one: [auth.conf.dist](./auth.conf.dist):
+```ini
+# Required Configuration
+SOURCE_URL=your_source_elasticsearch_url
+SOURCE_USER=source_username
+SOURCE_PASS=source_password
+DEST_URL=your_destination_elasticsearch_url
+DEST_USER=destination_username
+DEST_PASS=destination_password
+
+# Optional Configuration (defaults shown)
+LOCAL_PORT=9200
+COPY_MAPPINGS=true
+COPY_DATA=true
+COPY_TASKS=false
+COPY_PIPELINES=false
+INSECURE=false
+DEBUG=false
+```
+
+2. Run the tool:
 ```bash
-Usage of ./elasticlone:
-  -F int
-        Start copying from this document number (default 1)
-  -H string
-        Source host
-  -I string
-        Source index name
-  -P string
-        Source password
-  -R string
-        Source port
-  -S    Use SSL/HTTPS for source
-  -T int
-        Stop copying at this document number (0 for no limit)
-  -U string
-        Source username
-  -h string
-        Target host
-  -i string
-        Target index name
-  --insecure
-        Skip SSL certificate verification for source
-  -p string
-        Target password
-  -r string
-        Target port
-  -s    Use SSL/HTTPS for target
-  -u string
-        Target username
+./elasticlone
+```
+
+## Configuration Options
+| Key              | Description                                  | Default |
+|------------------|----------------------------------------------|---------|
+| `SOURCE_URL`     | Source Elasticsearch URL                     | -       |
+| `SOURCE_USER`    | Source cluster username                      | -       |
+| `SOURCE_PASS`    | Source cluster password                      | -       |
+| `DEST_URL`      | Destination Elasticsearch URL               | -       |
+| `DEST_USER`     | Destination cluster username                | -       |
+| `DEST_PASS`     | Destination cluster password                | -       |
+| `LOCAL_PORT`    | Local proxy port                            | 9200    |
+| `COPY_MAPPINGS` | Copy index mappings                         | true    |
+| `COPY_DATA`     | Copy index data                             | true    |
+| `COPY_TASKS`    | Copy tasks                                  | false   |
+| `COPY_PIPELINES`| Copy ingest pipelines                       | false   |
+| `INSECURE`      | Disable SSL certificate verification       | false   |
+| `DEBUG`         | Enable debug logging                       | false   |
+
+## Building
+```bash
+go build -o elasticlone main.go
+```
+
+## Requirements
+- Go 1.20+
+- Elasticsearch 7.x+
 ```
