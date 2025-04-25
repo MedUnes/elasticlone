@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io/ioutil" // Added for reading error response body
 	"log"
 	"net/http"
 	"os"
@@ -19,44 +20,26 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Global Elasticsearch clients
+// --- Globals, Config Struct, Time Layouts, Helper Functions ---
+// (These remain unchanged from the previous version - Omitted for Brevity)
+// ...
 var (
 	sourceClient *elasticsearch.Client
 	targetClient *elasticsearch.Client
 )
-
-// Configuration struct (same as before)
 type Config struct {
-	SourceHost       string
-	SourcePort       int
-	SourceUser       string
-	SourcePass       string
-	TargetHost       string
-	TargetPort       int
-	TargetUser       string
-	TargetPass       string
-	IndexName        string
-	TargetIndexName  string
-	BatchSize        int
-	Workers          int
-	SSLVerify        bool
-	ScrollDuration   time.Duration
-	MaxRetries       int
-	StartTime        *time.Time
-	EndTime          *time.Time
-	TimeShiftSeconds int
+	SourceHost       string; SourcePort       int; SourceUser       string; SourcePass       string
+	TargetHost       string; TargetPort       int; TargetUser       string; TargetPass       string
+	IndexName        string; TargetIndexName  string
+	BatchSize        int; Workers          int; SSLVerify        bool; ScrollDuration   time.Duration; MaxRetries       int
+	StartTime        *time.Time; EndTime          *time.Time; TimeShiftSeconds int
 }
-
-// Supported time layouts (same as before)
 var timeLayouts = []string{ time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05Z07:00", "2006-01-02 15:04:05", "2006-01-02", }
-// Helper function to parse time string (same as before)
 func parseTime(timeStr string, forConfig bool) (*time.Time, error) { if timeStr == "" { return nil, nil }; for _, layout := range timeLayouts { t, err := time.Parse(layout, timeStr); if err == nil { if forConfig && layout == "2006-01-02" { log.Printf("Info: Parsed date-only value '%s' using layout '%s'. StartTime implies 00:00:00, EndTime implies comparison '< %s 00:00:00'.", timeStr, layout, timeStr) }; return &t, nil } }; return nil, fmt.Errorf("could not parse time '%s' using supported layouts", timeStr) }
-// Helper function to get environment variables (same as before)
 func getEnv(key, fallback string) string { if value, exists := os.LookupEnv(key); exists && value != "" { return value }; return fallback }
-// Helper function to get required environment variables (same as before)
 func getRequiredEnv(key string) string { value, exists := os.LookupEnv(key); if !exists || value == "" { log.Fatalf("Error: Required environment variable %s is not set or is empty. Please check your .env file.", key) }; return value }
 
-// --- main Function (mostly same as before) ---
+// --- main Function (Unchanged from previous version) ---
 func main() {
 	err := godotenv.Load(); if err != nil { log.Println("Info: No .env file found or error loading it. Relying on existing environment variables.") }
 	cfg := Config{}; var parseErr error
@@ -90,10 +73,9 @@ func main() {
 	log.Println("Source and target Elasticsearch clients initialized."); processIndices(cfg); log.Println("Cloning process finished.")
 }
 
+
 // --- Utility Functions (createEsClient, getSourceIndices, hasTimestampField, getIndexMetadataAndCheckTimestamp, cleanSettings, createIndexWithMetadata, buildQuery, processScrollResponse, extractID, extractSource, clearScroll, refreshIndex) ---
-// These functions remain the same as in the previous version. They are omitted here for brevity
-// but are needed for the full code to compile and run. You can copy them from the previous response.
-// ... (Paste the unchanged utility functions here) ...
+// (Paste the unchanged utility functions from the previous response here) ...
 // Creates an Elasticsearch client (same as before)
 func createEsClient(clientType, host string, port int, user, pass string, sslVerify bool, maxRetries int) (*elasticsearch.Client, error) { address := fmt.Sprintf("http://%s:%d", host, port); scheme := "http"; if port == 443 || sslVerify || (user != "" && pass != "") { address = fmt.Sprintf("https://%s:%d", host, port); scheme = "https" }; esCfg := elasticsearch.Config{ Addresses: []string{address}, Username: user, Password: pass, RetryOnStatus: []int{502, 503, 504, 429}, MaxRetries: maxRetries, RetryBackoff: func(i int) time.Duration { return time.Duration(1<<uint(i)) * time.Second }, Transport: &http.Transport{ MaxIdleConnsPerHost: 10, ResponseHeaderTimeout: time.Second * 30, TLSClientConfig: &tls.Config{ InsecureSkipVerify: !sslVerify, }, }, }; log.Printf("Info: [%s Client] Attempting connection to %s", clientType, address); if !sslVerify && scheme == "https" { log.Printf("Warning: [%s Client] SSL verification is disabled (SSL_VERIFY=false)", clientType) }; esClient, err := elasticsearch.NewClient(esCfg); if err != nil { return nil, fmt.Errorf("[%s Client] error creating client: %w", clientType, err) }; res, err := esClient.Info(); if err != nil { return nil, fmt.Errorf("[%s Client] cannot connect to %s: %w", clientType, address, err) }; defer res.Body.Close(); if res.IsError() { return nil, fmt.Errorf("[%s Client] connection error to %s: %s", clientType, address, res.String()) }; log.Printf("[%s Client] Successfully connected to %s", clientType, address); return esClient, nil }
 // Gets indices matching the pattern from the source (same as before)
@@ -122,70 +104,52 @@ func refreshIndex(client *elasticsearch.Client, targetIndexName string) error { 
 
 // --- Modified Functions ---
 
-// Processes indices, gets metadata, and calls cloneIndex
+// Processes indices, gets metadata, and calls cloneIndex (Unchanged)
 func processIndices(appCfg Config) {
 	sourceIndices, err := getSourceIndices(appCfg.IndexName)
 	if err != nil { log.Fatalf("Failed to get source indices: %v", err) }
 	if len(sourceIndices) == 0 { log.Fatalf("No indices found matching source pattern '%s'. Aborting.", appCfg.IndexName) }
-
 	targetIndexNameOverride := appCfg.TargetIndexName
 	if targetIndexNameOverride != "" && len(sourceIndices) > 1 { log.Fatalf("Error: TARGET_INDEX_NAME ('%s') is specified, but the source pattern '%s' matched multiple indices (%v). TARGET_INDEX_NAME can only be used when the source pattern matches exactly one index.", targetIndexNameOverride, appCfg.IndexName, sourceIndices) }
-
 	for _, sourceIndexName := range sourceIndices {
 		targetIndexName := sourceIndexName
 		if targetIndexNameOverride != "" && len(sourceIndices) == 1 { targetIndexName = targetIndexNameOverride; log.Printf("Info: Using specified target index name '%s' for source index '%s'", targetIndexName, sourceIndexName) }
-
 		log.Printf("--- Starting clone: [%s] -> [%s] ---", sourceIndexName, targetIndexName)
 		mapping, settings, timestampFieldExists, err := getIndexMetadataAndCheckTimestamp(sourceClient, sourceIndexName)
 		if err != nil { log.Printf("Error getting metadata/checking timestamp for source index %s: %v. Skipping.", sourceIndexName, err); continue }
 		log.Printf("Retrieved mapping and settings for source index: %s. @timestamp field exists: %t", sourceIndexName, timestampFieldExists)
-
-		// Pass sourceIndexName down for the overwrite check logic
-		cloneIndex(sourceIndexName, targetIndexName, mapping, settings, timestampFieldExists, appCfg)
+		cloneIndex(sourceIndexName, targetIndexName, mapping, settings, timestampFieldExists, appCfg) // Pass sourceIndexName
 		log.Printf("--- Finished clone: [%s] -> [%s] ---", sourceIndexName, targetIndexName)
 	}
 }
 
-// Clones a single source index to a target index name, passing metadata and source name
+// Clones a single source index to a target index name (Unchanged)
 func cloneIndex(sourceIndexName, targetIndexName string, mapping, settings map[string]interface{}, timestampFieldExists bool, cfg Config) {
 	err := createIndexWithMetadata(targetClient, targetIndexName, mapping, settings)
 	if err != nil {
 		if strings.Contains(err.Error(), "resource_already_exists_exception") { log.Printf("Warning: Target index %s already exists. Skipping creation, will proceed to data copy.", targetIndexName) } else { log.Printf("Error creating target index %s: %v. Skipping index.", targetIndexName, err); return }
 	} else { log.Printf("Successfully created target index: %s", targetIndexName) }
-
 	// Pass sourceIndexName down
 	err = scrollAndBulkIndex(sourceIndexName, targetIndexName, timestampFieldExists, cfg)
 	if err != nil { log.Printf("Error during data copy for index %s -> %s: %v", sourceIndexName, targetIndexName, err) } else { log.Printf("Data copy finished for index %s -> %s", sourceIndexName, targetIndexName) }
-
 	err = refreshIndex(targetClient, targetIndexName); if err != nil { log.Printf("Warning: Failed to refresh target index %s: %v", targetIndexName, err) } else { log.Printf("Target index %s refreshed.", targetIndexName) }
 }
 
-// Scrolls through source index and bulk indexes data into the target index name
-// Passes sourceIndexName down to workers
+// Scrolls through source index and bulk indexes data (Unchanged)
 func scrollAndBulkIndex(sourceIndexName, targetIndexName string, timestampFieldExists bool, cfg Config) error {
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	docChan := make(chan json.RawMessage, cfg.BatchSize*(cfg.Workers+1))
-
 	queryBody, timeFilterApplied := buildQuery(cfg.StartTime, cfg.EndTime, timestampFieldExists)
 	if timeFilterApplied { log.Printf("Starting scroll for source index %s with time filter and batch size %d", sourceIndexName, cfg.BatchSize) } else { log.Printf("Starting scroll for source index %s (no time filter) with batch size %d", sourceIndexName, cfg.BatchSize) }
-
 	res, err := sourceClient.Search(sourceClient.Search.WithIndex(sourceIndexName), sourceClient.Search.WithSize(cfg.BatchSize), sourceClient.Search.WithScroll(cfg.ScrollDuration), sourceClient.Search.WithContext(ctx), sourceClient.Search.WithBody(strings.NewReader(queryBody)), sourceClient.Search.WithSort("_doc"))
 	if err != nil { return fmt.Errorf("initial scroll request failed for %s: %w", sourceIndexName, err) }
-
 	var scrollID string; var totalHits int64; var docsInBatch int
 	scrollID, totalHits, docsInBatch, err = processScrollResponse(res, docChan); if err != nil { return fmt.Errorf("processing initial scroll batch failed for %s: %w", sourceIndexName, err) }
 	if totalHits == 0 && docsInBatch == 0 { log.Printf("Info: Source index %s contains no documents matching the criteria.", sourceIndexName); close(docChan); clearScroll(sourceClient, scrollID); return nil }
 	if timeFilterApplied { log.Printf("Processing documents matching time filter for index %s (initial total estimate: %d)", sourceIndexName, totalHits) } else { log.Printf("Total documents to process for index %s: %d", sourceIndexName, totalHits) }
 	processedCount := int64(docsInBatch)
-
-	// Start workers, passing necessary config info AND sourceIndexName
-	for i := 0; i < cfg.Workers; i++ {
-		wg.Add(1)
-		// Pass sourceIndexName for the overwrite check
-		go bulkWorker(i, sourceIndexName, targetIndexName, docChan, &wg, timestampFieldExists, cfg)
-	}
-
+	for i := 0; i < cfg.Workers; i++ { wg.Add(1); go bulkWorker(i, sourceIndexName, targetIndexName, docChan, &wg, timestampFieldExists, cfg) } // Pass sourceIndexName
 	for {
 		log.Printf("Processed approx %d documents for %s...", processedCount, sourceIndexName)
 		res, err := sourceClient.Scroll(sourceClient.Scroll.WithScrollID(scrollID), sourceClient.Scroll.WithScroll(cfg.ScrollDuration), sourceClient.Scroll.WithContext(ctx))
@@ -195,48 +159,48 @@ func scrollAndBulkIndex(sourceIndexName, targetIndexName string, timestampFieldE
 		if docsInBatch == 0 { log.Printf("Scroll finished for %s (empty batch received).", sourceIndexName); break }
 		if scrollID == "" { log.Printf("Scroll finished for %s (empty scroll ID received).", sourceIndexName); break }
 	}
-
 	if scrollID != "" { clearScroll(sourceClient, scrollID) }
 	log.Println("Finished scrolling, closing document channel for", sourceIndexName); close(docChan)
 	log.Println("Waiting for bulk workers to finish for index", sourceIndexName); wg.Wait()
 	log.Println("All bulk workers finished for index", sourceIndexName); return nil
 }
 
-// Worker goroutine for bulk indexing, includes logic to omit _id for same-index time shifts
-// Now accepts sourceIndexName parameter
+
+// **** Worker goroutine for bulk indexing - REVISED ****
 func bulkWorker(id int, sourceIndexName, targetIndexName string, docChan <-chan json.RawMessage, wg *sync.WaitGroup, timestampFieldExists bool, cfg Config) {
 	defer wg.Done()
 	log.Printf("[Worker %d] Starting for source [%s] -> target [%s]", id, sourceIndexName, targetIndexName)
 
 	var buffer bytes.Buffer
 	var docsInBatch int
-	canApplyTimeShift := timestampFieldExists && cfg.TimeShiftSeconds != 0
-	isSameIndex := sourceIndexName == targetIndexName // Check if source and target are the same
+	// Determine conditions for time shifting and potential duplication upfront
+	shouldAttemptTimeShift := timestampFieldExists && cfg.TimeShiftSeconds != 0
+	isSameIndexOperation := sourceIndexName == targetIndexName
 
 	for docBytes := range docChan {
 		docID := extractID(docBytes)
-		sourceBytes := extractSource(docBytes) // Get original source
-		shiftAppliedToThisDoc := false         // Flag to track if shift was applied to THIS document
+		originalSourceBytes := extractSource(docBytes) // Get original source
+		finalSourceBytes := originalSourceBytes        // Start with original, modify if needed
+		shiftAppliedSuccessfully := false            // Track if THIS doc was shifted
 
 		// --- Apply Time Shift Logic ---
-		if canApplyTimeShift {
+		if shouldAttemptTimeShift {
 			var sourceMap map[string]interface{}
-			// Only try shifting if we can unmarshal the source
-			if err := json.Unmarshal(sourceBytes, &sourceMap); err == nil {
+			if err := json.Unmarshal(originalSourceBytes, &sourceMap); err == nil {
 				if tsValue, tsExists := sourceMap["@timestamp"]; tsExists {
 					if tsStr, ok := tsValue.(string); ok {
-						originalTime, err := parseTime(tsStr, false) // Try parsing timestamp from doc
+						originalTime, err := parseTime(tsStr, false)
 						if err == nil && originalTime != nil {
 							shiftedTime := originalTime.Add(time.Duration(cfg.TimeShiftSeconds) * time.Second)
 							sourceMap["@timestamp"] = shiftedTime.UTC().Format(time.RFC3339Nano) // Update map
-							modifiedSourceBytes, err := json.Marshal(sourceMap)                   // Re-marshal
+							modifiedSourceBytes, err := json.Marshal(sourceMap)
 							if err == nil {
-								sourceBytes = modifiedSourceBytes // Use modified source
-								shiftAppliedToThisDoc = true      // Mark shift as applied for this doc
+								finalSourceBytes = modifiedSourceBytes // Use modified source
+								shiftAppliedSuccessfully = true     // Mark shift successful for THIS doc
 							} else {
 								log.Printf("[Worker %d] Warning: Failed to re-marshal source after time shift for doc %s: %v", id, docID, err)
 							}
-						} // else: parsing @timestamp failed for this doc, log implicitly handled by parseTime helper or ignored
+						} // else: parsing @timestamp failed for this doc
 					} // else: @timestamp not a string
 				} // else: @timestamp field not in this doc
 			} else {
@@ -249,12 +213,19 @@ func bulkWorker(id int, sourceIndexName, targetIndexName string, docChan <-chan 
 		actionMetadata := map[string]interface{}{
 			"_index": targetIndexName,
 		}
-		// FIX: Omit _id ONLY if we are writing to the SAME index AND time shift was successfully applied to THIS document
-		if isSameIndex && shiftAppliedToThisDoc {
-			// Don't specify _id, let ES generate a new one for the duplicate
-			log.Printf("[Worker %d] Omitting _id for time-shifted duplicate doc in index [%s]", id, targetIndexName)
+
+		// ** FIX **: Omit _id only if:
+		// 1. Writing back to the *same index*
+		// 2. Time shifting is generally enabled for this run
+		// 3. Time shifting was *successfully applied* to this specific document
+		// This ensures we only duplicate the successfully shifted docs, not failed ones or original ones.
+		if isSameIndexOperation && shouldAttemptTimeShift && shiftAppliedSuccessfully {
+			// Omit _id to force document creation (duplication)
+			log.Printf("[Worker %d] Omitting _id for successfully time-shifted duplicate doc in index [%s]", id, targetIndexName)
 		} else {
-			// Specify the original _id for replacement or creation in target index
+			// Keep original _id for overwriting target (if different index) OR
+			// for overwriting target (if same index but NO time shift applied/enabled) OR
+			// for overwriting target (if same index and time shift FAILED for this doc)
 			actionMetadata["_id"] = docID
 		}
 
@@ -263,28 +234,88 @@ func bulkWorker(id int, sourceIndexName, targetIndexName string, docChan <-chan 
 		}
 		metaBytes, _ := json.Marshal(meta)
 
-		// Append metadata and potentially modified source to buffer
+		// Append metadata and the final source bytes (original or shifted)
 		buffer.Write(metaBytes)
 		buffer.WriteByte('\n')
-		buffer.Write(sourceBytes) // Use original or modified source
+		buffer.Write(finalSourceBytes)
 		buffer.WriteByte('\n')
 
 		docsInBatch++
 
 		if docsInBatch >= cfg.BatchSize {
-			sendBulkRequest(id, targetIndexName, &buffer)
+			sendBulkRequest(id, targetIndexName, &buffer) // Pass buffer by pointer
 			buffer.Reset()
 			docsInBatch = 0
 		}
 	}
 
+	// Send remaining items
 	if buffer.Len() > 0 {
 		log.Printf("[Worker %d] Sending final batch of %d docs to %s", id, docsInBatch, targetIndexName)
-		sendBulkRequest(id, targetIndexName, &buffer)
+		sendBulkRequest(id, targetIndexName, &buffer) // Pass buffer by pointer
 	}
 
 	log.Printf("[Worker %d] Finished for target index %s", id, targetIndexName)
 }
 
-// Sends a bulk request to the target cluster for a specific index (same as before)
-func sendBulkRequest(workerID int, targetIndexName string, buffer *bytes.Buffer) { if buffer.Len() == 0 { return }; res, err := targetClient.Bulk(bytes.NewReader(buffer.Bytes()), targetClient.Bulk.WithContext(context.Background())); if err != nil { log.Printf("[Worker %d] Error sending bulk request to %s: %v", workerID, targetIndexName, err); return }; defer res.Body.Close(); if res.IsError() { log.Printf("[Worker %d] Error response from bulk request to %s: %s", workerID, targetIndexName, res.String()) } else { var bulkResponse map[string]interface{}; if err := json.NewDecoder(res.Body).Decode(&bulkResponse); err == nil { if errors, ok := bulkResponse["errors"].(bool); ok && errors { log.Printf("[Worker %d] Bulk request to %s completed with item-level errors.", workerID, targetIndexName) } } else { log.Printf("[Worker %d] Warning: Could not decode bulk response for %s: %v", workerID, targetIndexName, err) } } }
+
+// Sends a bulk request to the target cluster for a specific index
+// Added more detailed error logging
+func sendBulkRequest(workerID int, targetIndexName string, buffer *bytes.Buffer) {
+	if buffer.Len() == 0 {
+		return
+	}
+
+	req := esapi.BulkRequest{
+		Body:    bytes.NewReader(buffer.Bytes()),
+		Index:   targetIndexName, // Specifying index here might help ES routing, but metadata action overrides it
+		Refresh: "false",         // Explicitly disable refresh on each bulk for performance
+	}
+
+	res, err := req.Do(context.Background(), targetClient) // Use target client
+
+	if err != nil {
+		log.Printf("[Worker %d] ERROR sending bulk request to %s: %v", workerID, targetIndexName, err)
+		// Consider adding retry logic here based on error type
+		return
+	}
+	defer res.Body.Close()
+
+	// Check for HTTP errors first
+	if res.IsError() {
+		bodyBytes, _ := ioutil.ReadAll(res.Body) // Read body for details
+		log.Printf("[Worker %d] ERROR response (%s) from bulk request to %s: %s", workerID, res.Status(), targetIndexName, string(bodyBytes))
+
+	} else {
+		// Decode successful response to check for item-level errors
+		var bulkResponse map[string]interface{}
+		if err := json.NewDecoder(res.Body).Decode(&bulkResponse); err == nil {
+			if errors, ok := bulkResponse["errors"].(bool); ok && errors {
+				log.Printf("[Worker %d] WARNING: Bulk request to %s completed WITH item-level errors. Sample errors:", workerID, targetIndexName)
+				// Log first few item errors for diagnosis
+				items, _ := bulkResponse["items"].([]interface{})
+				errorCount := 0
+				for _, item := range items {
+					if errorCount >= 5 { break } // Limit logged errors
+					itemMap, ok := item.(map[string]interface{})
+					if !ok { continue }
+					actionResult, ok := itemMap["index"].(map[string]interface{}) // Check "index" action
+					if !ok { continue }
+
+					if errorInfo, exists := actionResult["error"]; exists {
+						log.Printf("  - Item Error: ID=%v, Status=%v, Error=%v",
+							actionResult["_id"],
+							actionResult["status"],
+							errorInfo)
+						errorCount++
+					}
+				}
+			} else {
+				// Success, potentially log batch size completion? Can be noisy.
+				log.Printf("[Worker %d] Bulk request successful to %s.", workerID, targetIndexName)
+			}
+		} else {
+			log.Printf("[Worker %d] Warning: Could not decode successful bulk response body for %s: %v", workerID, targetIndexName, err)
+		}
+	}
+}
